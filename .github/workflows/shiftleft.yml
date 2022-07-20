@@ -48,7 +48,7 @@ jobs:
     - name: Export NG SAST Findings
       run: |
         cd $HOME
-        git clone --depth 1 --branch v0.0.3  https://github.com/ShiftLeftSecurity/field-integrations
+        git clone --depth 1 --branch v0.0.4  https://github.com/ShiftLeftSecurity/field-integrations
         cd field-integrations/shiftleft-utils || exit 1
         mkdir -p ${GITHUB_WORKSPACE}/ngsast_results
         pip3 install -r requirements.txt
