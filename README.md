@@ -5,3 +5,5 @@ The project documentation is all on the OWASP site at the <a href="https://owasp
 
 The current latest release is v1.2. Note that all the releases that are available here: https://github.com/OWASP/Benchmark/releases, are historical. The latest release is always available live by simply cloning or pulling the head of this repository (i.e., git pull).
 
+
+
