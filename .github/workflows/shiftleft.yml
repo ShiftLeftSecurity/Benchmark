@@ -1,0 +1,137 @@
+---
+# This workflow integrates ShiftLeft NG SAST with GitHub
+# Visit https://docs.shiftleft.io for help
+name: ShiftLeft
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  NextGen-Static-Analysis:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    # We are building this application with Java 11
+    - name: Setup Java JDK
+      uses: actions/setup-java@v1.4.3
+      with:
+        java-version: 11.0.x
+    - name: Package with maven
+      run: mvn compile package
+    - name: Download ShiftLeft CLI
+      run: |
+        curl https://cdn.shiftleft.io/download/sl > ${GITHUB_WORKSPACE}/sl && chmod a+rx ${GITHUB_WORKSPACE}/sl
+    # ShiftLeft requires Java 1.8. Post the package step override the version
+    - name: Setup Java JDK
+      uses: actions/setup-java@v1.4.3
+      with:
+        java-version: 1.8
+    - name: Extract branch name
+      shell: bash
+      run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+      id: extract_branch
+    - name: NextGen Static Analysis
+      run: ${GITHUB_WORKSPACE}/sl analyze --strict --wait --analysis-timeout=1h --app Benchmark --tag branch=${{ github.head_ref || steps.extract_branch.outputs.branch }} --java --cpg target/benchmark.war
+      env:
+        SHIFTLEFT_ACCESS_TOKEN: ${{ secrets.SHIFTLEFT_ACCESS_TOKEN }}
+        
+  OWASP-Benchmark-Score:
+    runs-on: ubuntu-20.04
+    needs: NextGen-Static-Analysis
+    steps:
+    - uses: actions/checkout@v2
+    - name: Setup Java JDK
+      uses: actions/setup-java@v1.4.3
+      with:
+        java-version: 11.0.x
+    - name: Export NG SAST Findings
+      run: |
+        cd $HOME
+        git clone --depth 1 --branch v0.0.3  https://github.com/ShiftLeftSecurity/field-integrations
+        cd field-integrations/shiftleft-utils || exit 1
+        mkdir -p ${GITHUB_WORKSPACE}/ngsast_results
+        pip3 install -r requirements.txt
+        python3 export.py --app Benchmark -f sl -o ${GITHUB_WORKSPACE}/ngsast_results/Benchmark.sl
+      env:
+        SHIFTLEFT_ACCESS_TOKEN: ${{ secrets.SHIFTLEFT_ACCESS_TOKEN }}
+        
+    - name: Package with maven
+      run: mvn compile package
+    - name: Calculate OWASP Benchmark Score
+      run: |
+        cd ${GITHUB_WORKSPACE}
+        mvn validate -Pbenchmarkscore -Dexec.args="expectedresults-1.2.csv ngsast_results ShiftLeft anonymous"
+        if [ -e "scorecard/Benchmark_Scorecard_for_ShiftLeft.html" ]; then
+            echo "*** Thank you for Benchmarking ShiftLeft NextGen Static Analysis ***"
+            echo "You can find the results for ShiftLeft under workflow artifacts called scorecard"
+        else
+            echo "Benchmark results were not produced correctly. Check if you have Java 1.8 installed"
+        fi
+    - uses: actions/upload-artifact@v2
+      with:
+        name: Benchmark_v1.2_Scorecard_for_ShiftLeft
+        path: scorecard
+
+    - name: Generate Results Checksum
+      run: |
+        OWASP_BENCHMARK_CHECKSUM=$(tail -n +2 scorecard/Benchmark_v1.2_Scorecard_for_ShiftLeft.csv |
+          sort |
+          tr -d '[:space:]' |
+          tr '[:upper:]' '[:lower:]' |
+          shasum |
+          tr -d " -")
+        echo "OWASP_BENCHMARK_CHECKSUM=$OWASP_BENCHMARK_CHECKSUM" >> $GITHUB_ENV
+
+    - uses: actions/setup-node@v2
+      with:
+        node-version: 14
+    - run: npm install jwt-decode node-fetch@2
+      if: github.event_name == 'pull_request'
+
+    - name: Notify Benchmark Results
+      uses: actions/github-script@v4
+      if: github.event_name == 'pull_request'
+      env:
+        OWASP_BENCHMARK_CHECKSUM: ${{ env.OWASP_BENCHMARK_CHECKSUM }}
+        SHIFTLEFT_USER_ID_V2: 4f0c5419-e17d-44f1-a2c0-ecb71dc01834
+        SHIFTLEFT_ACCESS_TOKEN: ${{ secrets.SHIFTLEFT_ACCESS_TOKEN }}
+        
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          // Leave a comment on the PR
+          const { issue: { number: issue_number }, repo: { owner, repo }  } = context;
+          const run = await github.actions.getWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId
+              });
+          const loc = run.data.html_url ? '[GitHub Action](' + run.data.html_url + ')' : 'GitHub Action';
+          const body = '👋 ' + '@' + context.actor + ' OWASP Benchmark scorecard is available for download in the Artifacts Section of ' + loc;
+          github.issues.createComment({ issue_number, owner, repo, body });
+
+          // Report the results
+          const jwt_decode = require('jwt-decode');
+          const fetch = require("node-fetch");
+          const {
+            SHIFTLEFT_API_HOST,
+            SHIFTLEFT_ACCESS_TOKEN,
+            SHIFTLEFT_USER_ID_V2,
+            OWASP_BENCHMARK_CHECKSUM,
+          } = process.env;
+          const decoded = jwt_decode(SHIFTLEFT_ACCESS_TOKEN);
+          const orgID = decoded.orgID;
+          const apiHost = SHIFTLEFT_API_HOST || 'www.shiftleft.io';
+          fetch(`https://${apiHost}/api/v4/private/orgs/${orgID}/bi_proxy/owasp_benchmark_complete`, {
+            headers: {
+              "Content-Type": "application/json; charset=utf-8",
+              "Authorization": `Bearer ${SHIFTLEFT_ACCESS_TOKEN}`,
+            },
+            method: 'POST',
+            body: JSON.stringify({
+              artifact_url: run.data.html_url || '',
+              result_sha1: OWASP_BENCHMARK_CHECKSUM,
+              user_id_v2: SHIFTLEFT_USER_ID_V2,
+            })
+          })
